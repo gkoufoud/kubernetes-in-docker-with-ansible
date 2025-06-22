@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Secret
+type: bootstrap.kubernetes.io/token
+metadata:
+  name: bootstrap-token-{{ bootstrap_tokens[cluster.name].token_id }}
+  namespace: kube-system
+stringData:
+  description: "Node bootstrap token."
+  token-id: "{{ bootstrap_tokens[cluster.name].token_id }}"
+  token-secret: "{{ bootstrap_tokens[cluster.name].token_secret }}"
+  usage-bootstrap-authentication: "true"
+  usage-bootstrap-signing: "true"
+  expiration: 2100-01-01T00:00:00Z
+  auth-extra-groups: system:bootstrappers:worker,system:bootstrappers:ingress

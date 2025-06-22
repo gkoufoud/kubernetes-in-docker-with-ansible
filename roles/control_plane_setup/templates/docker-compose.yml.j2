@@ -1,0 +1,106 @@
+version: '3.7'
+
+services:
+  etcd:
+    image: ${etcd_image}
+    restart: unless-stopped
+    command: >
+      /usr/local/bin/etcd
+      --name controller
+      --initial-advertise-peer-urls http://0.0.0.0:2380
+      --listen-peer-urls http://0.0.0.0:2380
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://0.0.0.0:2379
+      --initial-cluster-token etcd-cluster-0
+      --initial-cluster controller=http://0.0.0.0:2380
+      --initial-cluster-state new
+      --data-dir /var/lib/etcd
+    container_name: ${cluster_name}_etcd
+    volumes:
+      - ./etcd:/var/lib/etcd
+
+  kube-apiserver:
+    image: ${kube_apiserver_image}
+    restart: unless-stopped
+{% if item.workers is defined and item.workers | length > 0 %}
+    extra_hosts:
+{% for worker in item.workers %}
+      - "{{ worker.name }}:{{ worker.ip }}"
+{% endfor %}
+{% endif %}
+    container_name: ${cluster_name}_kube-apiserver
+    command: >
+      kube-apiserver
+      --advertise-address=${kube_apiserver_advertise_address}
+      --etcd-servers=http://etcd:2379
+      --allow-privileged=${kube_apiserver_allow_privileged}
+      --service-node-port-range=${kube_apiserver_service_node_port_range}
+      --authorization-mode=${kube_apiserver_authorization_mode}
+      --enable-bootstrap-token-auth=${kube_apiserver_enable_bootstrap_token_auth}
+      --bind-address=${kube_apiserver_bind_address}
+      --enable-admission-plugins=${kube_apiserver_enable_admission_plugins}
+      --secure-port=${kube_apiserver_port}
+      --kubelet-certificate-authority=/opt/certs/ca.crt
+      --kubelet-client-certificate=/opt/certs/kube-apiserver.crt
+      --kubelet-client-key=/opt/certs/kube-apiserver.key
+      --runtime-config=${kube_apiserver_runtime_config}
+      --service-account-key-file=/opt/certs/service-accounts.crt
+      --service-account-signing-key-file=/opt/certs/service-accounts.key
+      --service-account-issuer=https://server.kubernetes.local:${kube_apiserver_port}
+      --service-cluster-ip-range=${service_cidr}
+      --client-ca-file=/opt/certs/ca.crt
+      --tls-cert-file=/opt/certs/kube-apiserver.crt
+      --tls-private-key-file=/opt/certs/kube-apiserver.key
+{% if kube_apiserver_oidc_issuer_url is defined
+   and kube_apiserver_oidc_client_id is defined
+   and kube_apiserver_oidc_username_claim is defined
+   and kube_apiserver_oidc_groups_claim is defined %}
+      --oidc-issuer-url={{ kube_apiserver_oidc_issuer_url }}
+      --oidc-client-id={{ kube_apiserver_oidc_client_id }}
+      --oidc-username-claim={{ kube_apiserver_oidc_username_claim }}
+      --oidc-groups-claim={{ kube_apiserver_oidc_groups_claim }}
+{% endif %}
+      --v=2
+    volumes:
+      - ./certs:/opt/certs
+    ports:
+      - "${kube_apiserver_port}:${kube_apiserver_port}"
+    depends_on:
+      - etcd
+
+  kube-controller-manager:
+    image: ${kube_controller_manager_image}
+    restart: unless-stopped
+    container_name: ${cluster_name}_kube-controller-manager
+    command: >
+      kube-controller-manager
+      --bind-address=${kube_controller_manager_bind_address}
+      --cluster-name=${kube_controller_manager_cluster_name}
+      --cluster-signing-cert-file=/opt/certs/ca.crt
+      --cluster-signing-key-file=/opt/certs/ca.key
+      --kubeconfig=/opt/kubeconfigs/kube-controllermanager.kubeconfig
+      --root-ca-file=/opt/certs/ca.crt
+      --service-account-private-key-file=/opt/certs/service-accounts.key
+      --feature-gates=RotateKubeletServerCertificate=true
+      --service-cluster-ip-range=${service_cidr}
+      --use-service-account-credentials=${kube_controller_manager_use_service_account_credentials}
+      --controllers=${kube_controller_manager_controllers}
+      --v=2
+    volumes:
+      - ./certs:/opt/certs
+      - ./kubeconfigs:/opt/kubeconfigs
+    depends_on:
+      - kube-apiserver
+
+  kube-scheduler:
+    image: ${kube_scheduler_image}
+    restart: unless-stopped
+    container_name: ${cluster_name}_kube-scheduler
+    command: >
+      kube-scheduler
+      --config=/opt/kubeconfigs/kube-scheduler.yaml
+      --v=2
+    volumes:
+      - ./kubeconfigs:/opt/kubeconfigs
+    depends_on:
+      - kube-apiserver

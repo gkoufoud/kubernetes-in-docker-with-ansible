@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-proxy
+  namespace: kube-system
+  labels:
+    tier: node
+    app.kubernetes.io/name: kube-proxy
+spec:
+  selector:
+    matchLabels:
+      tier: node
+      app.kubernetes.io/name: kube-proxy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        tier: node
+        app.kubernetes.io/name: kube-proxy
+    spec:
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      serviceAccountName: kube-proxy
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+                - arm64
+              - key: eks.amazonaws.com/compute-type
+                operator: NotIn
+                values:
+                - fargate
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: kube-proxy
+          image: registry.k8s.io/kube-proxy:v{{ k8s_version }}
+          command:
+            - kube-proxy
+            - --cluster-cidr={{ pod_cidr }}
+            - --hostname-override=$(NODE_NAME)
+            - --kubeconfig=/etc/kubernetes/kubeconfig
+            - --proxy-mode=ipvs
+            - --ipvs-scheduler=rr
+            - --ipvs-udp-timeout=10s
+            - --metrics-bind-address=0.0.0.0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10256
+            initialDelaySeconds: 15
+            timeoutSeconds: 15
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/kubernetes
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: ssl-certs-host
+              mountPath: /etc/ssl/certs
+              readOnly: true
+      imagePullSecrets:
+        - name: harbor-tools-creds
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: kubeconfig
+          configMap:
+            name: kubeconfig-in-cluster
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: ssl-certs-host
+          hostPath:
+            path: /usr/share/ca-certificates
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: kube-system
+  name: kube-proxy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node-proxier # Automatically created system role.
+subjects:
+- kind: ServiceAccount
+  name: kube-proxy
+  namespace: kube-system

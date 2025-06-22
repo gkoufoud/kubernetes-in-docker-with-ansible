@@ -1,0 +1,4 @@
+- name: Reload haproxy container
+  ansible.builtin.shell: docker restart haproxy
+  become: true
+  delegate_to: "{{ haproxy.host }}"

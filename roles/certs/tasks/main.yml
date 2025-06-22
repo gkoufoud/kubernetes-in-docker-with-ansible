@@ -1,0 +1,475 @@
+- name: Create cert_keys list by appending .key to cert names
+  set_fact:
+    cert_keys: "{{ certs | map('regex_replace', '$', '.key') | list }}"
+
+- name: Check if CA key exists on remote control_host
+  ansible.builtin.stat:
+    path: "{{ kubernetes_store_dir }}/{{ item.name }}/certs/ca.key"
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  register: remote_ca_keys
+
+- name: Create local kubernetes directories
+  ansible.builtin.file:
+    path: "/tmp/{{ item.0.name }}/{{ item.1 }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ resolved_clusters | subelements('kubernetes_dirs') }}"
+  run_once: true
+
+- name: Recursively find kubernetes certs
+  ansible.builtin.find:
+    paths: "{{ kubernetes_store_dir }}/{{ item.name }}/certs"
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  register: kubernetes_certs
+
+- name: Gather missing certs per cluster
+  set_fact:
+    missing_cert_files: "{{ missing_cert_files | default([]) + [missing_entry] }}"
+  vars:
+    actual_files: "{{ item.0.files | map(attribute='path') | map('basename') | list }}"
+    missing: "{{ cert_keys | difference(actual_files) }}"
+    missing_entry:
+      cluster: "{{ item.1.name }}"
+      control_host: "{{ item.1.control_host }}"
+      missing_files: "{{ missing }}"
+      first_service_ip: "{{ item.1.first_service_ip }}"
+      api_fqdn: "{{ item.1.api_fqdn }}"
+  when: missing | length > 0
+  loop: "{{ kubernetes_certs.results | zip(resolved_clusters) | list }}"
+  loop_control:
+    loop_var: item
+
+- name: Ensure missing_cert_files is defined
+  set_fact:
+    missing_cert_files: "{{ missing_cert_files | default([]) + [item | combine({'cluster': item.name, 'missing_files': []})] }}"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: missing_cert_files is not defined
+
+- name: Fetch CA key and cert from remote host if ca.key is present remotely
+  ansible.builtin.fetch:
+    src: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    flat: yes
+    mode: "{{ '0600' if item.1 == 'ca.key' else '0644' }}"
+  loop: >-
+    {{
+      missing_cert_files
+      | rejectattr('missing_files', 'contains', 'ca.key')
+      | map('combine', {'certs_to_fetch': ['ca.key', 'ca.crt']})
+      | subelements('certs_to_fetch')
+    }}
+  loop_control:
+    label: "{{ item.0.cluster }}/{{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+# ##################### Private Keys #####################
+
+- name: Generate CA private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'ca.key' in item.missing_files"
+
+
+- name: Generate kube-apiserver private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/kube-apiserver.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-apiserver.key' in item.missing_files"
+
+- name: Generate kube-scheduler private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/kube-scheduler.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-scheduler.key' in item.missing_files"
+
+- name: Generate kube-controllermanager private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/kube-controllermanager.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-controllermanager.key' in item.missing_files"
+
+- name: Generate service-accounts private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/service-accounts.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'service-accounts.key' in item.missing_files"
+
+- name: Generate kube-proxy private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/kube-proxy.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-proxy.key' in item.missing_files"
+
+- name: Generate admin private key locally
+  community.crypto.openssl_privatekey:
+    path: "/tmp/{{ item.cluster }}/certs/admin.key"
+    size: 4096
+    type: RSA
+  loop: "{{ missing_cert_files }}"
+  when: "'admin.key' in item.missing_files"
+
+# ##################### CSRs #####################
+
+- name: Create certificate signing request (CSR) for CA certificate
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/ca.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    common_name: Kubernetes CA
+    country_name: US
+    locality_name: Seattle
+    organization_name: Homelab
+    organizational_unit_name: IT
+    use_common_name_for_san: false  # since we do not specify SANs, don't use CN as a SAN
+    basic_constraints:
+      - 'CA:TRUE'
+    basic_constraints_critical: true
+    key_usage:
+      - cRLSign
+      - keyCertSign
+    key_usage_critical: true
+  loop: "{{ missing_cert_files }}"
+  when: "'ca.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for kube-apiserver
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/kube-apiserver.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/kube-apiserver.key"
+    common_name: kube-apiserver
+    organization_name: system:masters
+    country_name: US
+    locality_name: Seattle
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+      - serverAuth
+    create_subject_key_identifier: true
+    subject_alt_name:
+      - "IP:127.0.0.1"
+      - "IP:{{ item.first_service_ip }}"
+      - "IP:{{ item.control_host }}"
+      - "DNS:kubernetes"
+      - "DNS:kubernetes.default"
+      - "DNS:kubernetes.default.svc"
+      - "DNS:kubernetes.default.svc.cluster"
+      - "DNS:kubernetes.svc.cluster.local"
+      - "DNS:server.kubernetes.local"
+      - "DNS:api-server.kubernetes.local"
+      - "DNS:kube-apiserver"
+      - "DNS:{{ item.api_fqdn }}"
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-apiserver.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for kube-scheduler
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/kube-scheduler.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/kube-scheduler.key"
+    common_name: system:kube-scheduler
+    country_name: US
+    locality_name: Seattle
+    organization_name: system:kube-scheduler
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+      - serverAuth
+    create_subject_key_identifier: true
+    subject_alt_name:
+      - "IP:127.0.0.1"
+      - "DNS:kube-scheduler"
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-scheduler.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for kube-controllermanager
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/kube-controllermanager.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/kube-controllermanager.key"
+    common_name: system:kube-controller-manager
+    country_name: US
+    locality_name: Seattle
+    organization_name: system:kube-controller-manager
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+      - serverAuth
+    create_subject_key_identifier: true
+    subject_alt_name:
+      - "IP:127.0.0.1"
+      - "DNS:kube-controller-manager"
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-controllermanager.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for service-accounts
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/service-accounts.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/service-accounts.key"
+    common_name: service-accounts
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+    create_subject_key_identifier: true
+  loop: "{{ missing_cert_files }}"
+  when: "'service-accounts.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for kube-proxy
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/kube-proxy.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/kube-proxy.key"
+    common_name: system:kube-proxy
+    country_name: US
+    locality_name: Seattle
+    organization_name: system:node-proxier
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+      - serverAuth
+    create_subject_key_identifier: true
+    subject_alt_name:
+      - "IP:127.0.0.1"
+      - "DNS:kube-proxy"
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-proxy.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create certificate signing request (CSR) for admin
+  community.crypto.openssl_csr:
+    path: "/tmp/{{ item.cluster }}/certs/admin.csr"
+    privatekey_path: "/tmp/{{ item.cluster}}/certs/admin.key"
+    common_name: admin
+    organization_name: system:masters
+    basic_constraints:
+      - 'CA:FALSE'
+    basic_constraints_critical: true
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - clientAuth
+    create_subject_key_identifier: true
+  loop: "{{ missing_cert_files }}"
+  when: "'admin.key' in item.missing_files"
+  delegate_to: localhost
+
+
+# ##################### Certificates #####################
+
+- name: Create self-signed CA certificate
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/ca.csr"
+    privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: selfsigned
+  loop: "{{ missing_cert_files }}"
+  when: "'ca.key' in item.missing_files"
+  delegate_to: localhost
+
+
+- name: Create self-signed certificate for kube-apiserver
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/kube-apiserver.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/kube-apiserver.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-apiserver.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create self-signed certificate for kube-scheduler
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/kube-scheduler.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/kube-scheduler.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-scheduler.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create self-signed certificate for kube-controllermanager
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/kube-controllermanager.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/kube-controllermanager.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-controllermanager.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create self-signed certificate for service-accounts
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/service-accounts.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/service-accounts.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'service-accounts.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create self-signed certificate for kube-proxy
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/kube-proxy.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/kube-proxy.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'kube-proxy.key' in item.missing_files"
+  delegate_to: localhost
+
+- name: Create self-signed certificate for admin
+  community.crypto.x509_certificate:
+    path: "/tmp/{{ item.cluster }}/certs/admin.crt"
+    csr_path: "/tmp/{{ item.cluster }}/certs/admin.csr"
+    ownca_path: "/tmp/{{ item.cluster }}/certs/ca.crt"
+    ownca_privatekey_path: "/tmp/{{ item.cluster }}/certs/ca.key"
+    provider: ownca
+  loop: "{{ missing_cert_files }}"
+  when: "'admin.key' in item.missing_files"
+  delegate_to: localhost
+
+  ##################### COPY #####################
+
+- name: Copy CA key and cert to control_host if ca.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'ca.key') | map('combine', {'certs_to_copy': ['ca.key', 'ca.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy kube-apiserver key and cert to control_host if kube-apiserver.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'kube-apiserver.key') | map('combine', {'certs_to_copy': ['kube-apiserver.key', 'kube-apiserver.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy kube-scheduler key and cert to control_host if kube-scheduler.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'kube-scheduler.key') | map('combine', {'certs_to_copy': ['kube-scheduler.key', 'kube-scheduler.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy service-accounts key and cert to control_host if service-accounts.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'service-accounts.key') | map('combine', {'certs_to_copy': ['service-accounts.key', 'service-accounts.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy kube-controllermanager key and cert to control_host if kube-controllermanager.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'kube-controllermanager.key') | map('combine', {'certs_to_copy': ['kube-controllermanager.key', 'kube-controllermanager.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy kube-proxy key and cert to control_host if kube-proxy.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'kube-proxy.key') | map('combine', {'certs_to_copy': ['kube-proxy.key', 'kube-proxy.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Copy admin key and cert to control_host if admin.key is missing
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    dest: "{{ kubernetes_store_dir }}/{{ item.0.cluster }}/certs/{{ item.1 }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: yes
+  loop: "{{ missing_cert_files | selectattr('missing_files', 'contains', 'admin.key') | map('combine', {'certs_to_copy': ['admin.key', 'admin.crt']}) | list | subelements('certs_to_copy') }}"
+  loop_control:
+    label: "{{ item.0.cluster }} - {{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"

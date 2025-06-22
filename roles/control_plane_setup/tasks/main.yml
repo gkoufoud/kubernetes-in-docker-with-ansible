@@ -1,0 +1,244 @@
+- name: Gather facts from control hosts
+  ansible.builtin.setup:
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  run_once: true
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  run_once: false
+
+- name: Install prerequisites
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  run_once: false
+
+- name: Create keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+
+- name: Download Docker GPG key
+  get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+
+- name: Add Docker APT repository
+  apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    filename: docker
+    state: present
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+
+- name: Install Docker
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  run_once: false
+
+- name: Ensure Docker is running
+  service:
+    name: docker
+    state: started
+    enabled: yes
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+
+- name: Create docker-compose environment file for each cluster
+  ansible.builtin.template:
+    src: cp_env.j2
+    dest: "/opt/kubernetes/{{ item.name }}/.env"
+    mode: "0644"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    cluster_name: "{{ item.name }}"
+    service_cidr: "{{ item.service_cidr }}"
+    kube_apiserver_advertise_address: "{{ item.control_host }}"
+    kube_apiserver_port: "{{ item.api_port }}"
+    etcd_version: "{{ item.etcd_version }}"
+    k8s_version: "{{ item.k8s_version }}"
+
+- name: Create docker-compose file for each cluster
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "/opt/kubernetes/{{ item.name }}/docker-compose.yml"
+    mode: "0644"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  # You can add variables for oidc authentication (i.e., kube_apiserver_oidc_issuer_url, kube_apiserver_oidc_client_id, kube_apiserver_oidc_username_claim, kube_apiserver_oidc_groups_claim)
+
+- name: Copy kube-scheduler.yaml to control hosts
+  ansible.builtin.copy:
+    src: files/kube-scheduler.yaml
+    dest: "/opt/kubernetes/{{ item.name }}/kubeconfigs/kube-scheduler.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  become: true
+
+- name: Copy kube-apiserver-to-kubelet.yaml to control hosts
+  ansible.builtin.copy:
+    src: files/kube-apiserver-to-kubelet.yaml
+    dest: "/opt/kubernetes/{{ item.name }}/kube-apiserver-to-kubelet.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  become: true
+
+- name: Generate bootstrap token for each cluster
+  set_fact:
+    bootstrap_tokens: "{{ bootstrap_tokens | default({}) | combine({
+      item.name: {
+        'token_id': (
+          (item.name | hash('sha1') | b64encode | lower)
+          | regex_replace('[^a-z0-9]', '')
+        )[0:6],
+        'token_secret': (
+          (item.name | hash('sha256') | b64encode | lower)
+          | regex_replace('[^a-z0-9]', '')
+        )[0:16]
+      }}) }}"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Render bootstrap token secrets locally
+  ansible.builtin.template:
+    src: bootstrap-token.yaml.j2
+    dest: "/tmp/{{ cluster.name }}-bootstrap-token.yaml"
+    mode: "0644"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    loop_var: cluster
+  delegate_to: localhost
+
+- name: Render in-cluster kubeconfig
+  ansible.builtin.template:
+    src: kubeconfig-in-cluster.yaml.j2
+    dest: "/opt/kubernetes/{{ item.name }}/kubeconfig-in-cluster.yaml"
+    mode: "0744"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    control_host: "{{ item.control_host }}"
+    api_port: "{{ item.api_port }}"
+
+- name: Render kube-proxy.yaml.j2
+  ansible.builtin.template:
+    src: kube-proxy.yaml.j2
+    dest: "/opt/kubernetes/{{ item.name }}/kube-proxy.yaml"
+    mode: "0744"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    pod_cidr: "{{ item.pod_cidr }}"
+    k8s_version: "{{ item.k8s_version }}"
+
+- name: Render kubelet-csr-approver.yaml.j2
+  ansible.builtin.template:
+    src: kubelet-csr-approver.yaml.j2
+    dest: "/opt/kubernetes/{{ item.name }}/kubelet-csr-approver.yaml"
+    mode: "0744"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    node_cidr: "{{ item.node_cidr | default('0.0.0.0/0') }}"
+    k8s_version: "{{ item.k8s_version }}"
+
+- name: Download calico manifest
+  get_url:
+    url:  https://raw.githubusercontent.com/projectcalico/calico/v{{ item.calico_version }}/manifests/calico.yaml
+    dest: /opt/kubernetes/{{ item.name }}/calico.yaml.tmp
+    mode: '0644'
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+
+- name: Setting pod_cidr
+  ansible.builtin.shell: |
+    cat /opt/kubernetes/{{ item.name }}/calico.yaml.tmp | sed 's/# - name: CALICO_IPV4POOL_CIDR/- name: CALICO_IPV4POOL_CIDR/g' | sed 's@#   value: "192.168.0.0/16"@  value: "10.2.0.0/16"@g' > /opt/kubernetes/{{ item.name }}/calico.yaml
+    sed -i "s#192.168.0.0/16#{{ item.pod_cidr }}#g" /opt/kubernetes/{{ item.name }}/calico.yaml
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ item.control_host }}"
+  when: item.calico_version is defined
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.control_host }})"
+
+- name: Copy bootstrap token secret to control host
+  ansible.builtin.copy:
+    src: "/tmp/{{ cluster.name }}-bootstrap-token.yaml"
+    dest: "/opt/kubernetes/{{ cluster.name }}/bootstrap-token.yaml"
+    mode: "0644"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    loop_var: cluster
+  delegate_to: "{{ cluster.control_host }}"
+
+- name: Download kubectl binary to control hosts
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/v{{ item.k8s_version }}/bin/linux/amd64/kubectl"
+    dest: "/usr/local/bin/kubectl"
+    mode: '0755'
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.control_host }})"
+
+- name: Render apply-manifests.sh.j2
+  ansible.builtin.template:
+    src: apply-manifests.sh.j2
+    dest: "/opt/kubernetes/{{ item.name }}/apply-manifests.sh"
+    mode: "0744"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    api_fqdn: "{{ item.api_fqdn }}"
+    api_port: "{{ item.api_port }}"
+
+- name: Start Kubernetes control plane containers
+  ansible.builtin.shell: docker compose up -d
+  args:
+    chdir: "/opt/kubernetes/{{ item.name }}"
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.control_host }})"
+
+- name: Execute apply-manifests.sh
+  ansible.builtin.shell: "/opt/kubernetes/{{ item.name }}/apply-manifests.sh"
+  args:
+    chdir: "/opt/kubernetes/{{ item.name }}"
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.control_host }})"

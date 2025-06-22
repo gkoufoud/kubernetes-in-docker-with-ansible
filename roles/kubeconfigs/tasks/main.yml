@@ -1,0 +1,88 @@
+- name: Create cert filenames list by appending .crt to components variable
+  set_fact:
+    cert_filenames: "{{ components | map('regex_replace', '$', '.crt') | list }}"
+
+- name: Define component cert/key files to fetch
+  set_fact:
+    kubeconfig_files_to_fetch: >-
+      {{
+        resolved_clusters
+        | map('combine', {
+            'files': (
+              components | map('regex_replace', '^', '') | map('regex_replace', '$', '.crt') | list
+              + components | map('regex_replace', '^', '') | map('regex_replace', '$', '.key') | list
+              + ['ca.crt']
+            )
+          })
+        | list
+      }}
+
+- name: Ensure local certs directory exists
+  ansible.builtin.file:
+    path: "/tmp/kubeconfigs/{{ item.0.name }}/{{ item.1 }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ resolved_clusters | subelements('kubernetes_dirs') }}"
+  delegate_to: localhost
+
+- name: Fetch ca.crt from remote hosts
+  ansible.builtin.fetch:
+    src: "{{ kubernetes_store_dir }}/{{ item.name }}/certs/ca.crt"
+    dest: "tmp/kubeconfigs/{{ item.name }}/ca.crt"
+    flat: yes
+    mode: '0644'
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+
+- name: Fetch kubeconfig-related certs and keys from control hosts
+  ansible.builtin.fetch:
+    src: "{{ kubernetes_store_dir }}/{{ item.0.name }}/certs/{{ item.1 }}"
+    dest: "/tmp/{{ item.0.name }}/certs/{{ item.1 }}"
+    flat: yes
+    mode: "{{ '0600' if item.1.endswith('.key') else '0644' }}"
+  loop: "{{ kubeconfig_files_to_fetch | subelements('files') }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"
+
+- name: Read cert and key content for each component
+  ansible.builtin.set_fact:
+    kubeconfig_cert_data: "{{ kubeconfig_cert_data | default({}) | combine({(item.0.name ~ '_' ~ item.1): {
+      'ca_crt': lookup('file', '/tmp/' ~ item.0.name ~ '/certs/ca.crt'),
+      'client_crt': lookup('file', '/tmp/' ~ item.0.name ~ '/certs/' ~ item.1 ~ '.crt'),
+      'client_key': lookup('file', '/tmp/' ~ item.0.name ~ '/certs/' ~ item.1 ~ '.key'),
+      'api_fqdn': item.0.api_fqdn,
+      'component': item.1}}) }}"
+  loop: "{{ resolved_clusters | product(components) | list }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Render kubeconfigs locally
+  ansible.builtin.template:
+    src: kubeconfig.j2
+    dest: "/tmp/kubeconfigs/{{ item.0.name }}/kubeconfigs/{{ item.1 }}.kubeconfig"
+    mode: "0600"
+  loop: "{{ resolved_clusters | product(components) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1 }}"
+  vars:
+    ca_crt: "{{ lookup('file', '/tmp/' ~ item.0.name ~ '/certs/ca.crt') | b64encode }}"
+    cert: "{{ lookup('file', '/tmp/' ~ item.0.name ~ '/certs/' ~ item.1 ~ '.crt') | b64encode }}"
+    key: "{{ lookup('file', '/tmp/' ~ item.0.name ~ '/certs/' ~ item.1 ~ '.key') | b64encode }}"
+    api_fqdn: "{{ item.0.api_fqdn }}"
+    api_port: "{{ item.0.api_port }}"
+    component: "{{ item.1 }}"
+  delegate_to: localhost
+
+
+- name: Copy kubeconfigs to remote control hosts
+  ansible.builtin.copy:
+    src: "/tmp/kubeconfigs/{{ item.0.name }}/kubeconfigs/{{ item.1 }}.kubeconfig"
+    dest: "/opt/kubernetes/{{ item.0.name }}/kubeconfigs/{{ item.1 }}.kubeconfig"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ resolved_clusters | product(components) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1 }}"
+  delegate_to: "{{ item.0.control_host }}"

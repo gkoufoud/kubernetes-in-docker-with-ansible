@@ -1,0 +1,287 @@
+- name: Gather facts
+  ansible.builtin.setup:
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }} ({{ item.1.ip }})"
+  run_once: true
+
+- name: Add Docker GPG key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/debian/gpg
+    state: present
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }}"
+  run_once: true
+
+- name: Add Docker APT repository for containerd
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+    filename: docker
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }}"
+  run_once: true
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: yes
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }} ({{ item.1.ip }})"
+  run_once: true
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - containerd.io
+    state: present
+    update_cache: false
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }} ({{ item.1.ip }})"
+  run_once: true
+
+- name: Ensure nf_conntrack kernel module is loaded
+  become: true
+  ansible.builtin.modprobe:
+    name: nf_conntrack
+    state: present
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }} ({{ item.1.ip }})"
+  run_once: true
+
+- name: Persist nf_conntrack module loading on boot
+  become: true
+  copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: "nf_conntrack\n"
+    mode: '0644'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }} ({{ item.1.ip }})"
+  run_once: true
+
+- name: Regenerate containerd config with CRI plugin enabled
+  ansible.builtin.shell: |
+    containerd config default > /etc/containerd/config.toml
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  run_once: true
+
+- name: Set SystemdCgroup to true in containerd config
+  ansible.builtin.shell: |
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+
+- name: Restart and enable containerd
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    enabled: yes
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.1.name }}"
+  run_once: true
+
+- name: Create /opt/cni/bin directory
+  ansible.builtin.file:
+    path: /opt/cni/bin
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Create /var/lib/kubelet directory
+  ansible.builtin.file:
+    path: /var/lib/kubelet
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  run_once: true
+
+- name: Download and extract CNI plugins
+  ansible.builtin.unarchive:
+    src: "https://github.com/containernetworking/plugins/releases/download/v{{ item.0.cni_version }}/cni-plugins-linux-amd64-v{{ item.0.cni_version }}.tgz"
+    dest: /opt/cni/bin
+    remote_src: yes
+    creates: /opt/cni/bin/bridge
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Download kubelet binary to /usr/local/bin/kubelet
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/v{{ item.0.k8s_version }}/bin/linux/amd64/kubelet"
+    dest: /usr/local/bin/kubelet
+    mode: '0755'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Download kubectl binary to /usr/bin/kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/v{{ item.0.k8s_version }}/bin/linux/amd64/kubectl"
+    dest: /usr/bin/kubectl
+    mode: '0755'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Copy ca.crt from control host to worker node
+  ansible.builtin.fetch:
+    src: "{{ kubernetes_store_dir }}/{{ item.0.name }}/certs/ca.crt"
+    dest: "/tmp/{{ item.0.name }}_ca.crt"
+    flat: yes
+  delegate_to: "{{ item.0.control_host }}"
+  run_once: true
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  register: ca_copy_result
+
+- name: Copy ca.crt from localhost to worker node
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.0.name }}_ca.crt"
+    dest: /var/lib/kubelet/ca.crt
+    owner: root
+    group: root
+    mode: '0644'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Fetch bootstrap-token.yaml from control host
+  ansible.builtin.fetch:
+    src: "{{ kubernetes_store_dir }}/{{ item.0.name }}/bootstrap-token.yaml"
+    dest: "/tmp/{{ item.0.name }}_bootstrap-token.yaml"
+    flat: yes
+  delegate_to: "{{ item.0.control_host }}"
+  run_once: true
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+
+- name: Read bootstrap token from fetched YAML
+  ansible.builtin.slurp:
+    src: "/tmp/{{ item.0.name }}_bootstrap-token.yaml"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+  register: bootstrap_token_data
+
+- name: Extract token ID and secret from bootstrap-token.yaml
+  set_fact:
+    bootstrap_tokens_by_cluster: >-
+      {{
+        bootstrap_tokens_by_cluster | default({}) | combine({
+          item.0.name: {
+            'token-id': (bootstrap_token_yaml | b64decode | from_yaml).stringData['token-id'],
+            'token-secret': (bootstrap_token_yaml | b64decode | from_yaml).stringData['token-secret']
+          }
+        })
+      }}
+  vars:
+    bootstrap_token_yaml: "{{ bootstrap_token_data.results | selectattr('item.0.name', 'equalto', item.0.name) | map(attribute='content') | first }}"
+  loop: "{{ resolved_clusters | subelements('workers') | unique(attribute='0.name') }}"
+  run_once: true
+
+
+- name: Create bootstrap kubeconfig on each worker
+  ansible.builtin.template:
+    src: kubeconfig-bootstrap.yaml.j2
+    dest: /var/lib/kubelet/kubeconfig-bootstrap
+    owner: root
+    group: root
+    mode: '0600'
+  vars:
+    bootstrap_token_id: "{{ bootstrap_tokens_by_cluster[item.0.name]['token-id'] }}"
+    bootstrap_token_secret: "{{ bootstrap_tokens_by_cluster[item.0.name]['token-secret'] }}"
+    api_host: "{{ item.0.control_host }}"
+    api_port: "{{ item.0.api_port }}"
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Create the kubelet configuration file
+  ansible.builtin.template:
+    src: kubelet-config.yaml.j2
+    dest: /var/lib/kubelet/kubelet-config.yaml
+    owner: root
+    group: root
+    mode: '0600'
+  vars:
+    cluster_dns: "{{ item.0.service_cidr | ansible.utils.nthhost(10) }}"
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Install kubelet systemd unit file
+  ansible.builtin.copy:
+    src: kubelet.service
+    dest: /etc/systemd/system/kubelet.service
+    owner: root
+    group: root
+    mode: '0644'
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+- name: Enable and start kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+    state: started
+    daemon_reload: true
+  delegate_to: "{{ item.1.ip }}"
+  loop: "{{ resolved_clusters | subelements('workers') }}"
+  loop_control:
+    label: "{{ item.0.name }} - {{ item.1.name }}"
+  run_once: true
+
+# - name: Show var
+#   debug:
+#     var: bootstrap_token_data

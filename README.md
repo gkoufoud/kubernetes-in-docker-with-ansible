@@ -18,6 +18,23 @@ This project provides a lightweight and repeatable way to bootstrap multiple **K
 
 ---
 
+## 🛠️ Implementation Details
+
+This project **does not use `kubeadm`**. Instead, the Kubernetes control plane is launched directly with `docker-compose` using the official components:
+
+- `etcd`
+- `kube-apiserver`
+- `kube-controller-manager`
+- `kube-scheduler`
+
+Each component is configured explicitly via Ansible templates.
+
+Worker nodes join the cluster using **bootstrap tokens**, and **serving certificates are automatically approved** using the [`kubelet-csr-approver`](https://github.com/postfinance/kubelet-csr-approver) controller.
+
+This enables a clean and flexible setup with complete control over the Kubernetes internals.
+
+---
+
 ## 📁 Directory Structure
 
 ```text

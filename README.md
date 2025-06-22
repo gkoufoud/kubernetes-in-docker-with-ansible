@@ -18,6 +18,12 @@ This project provides a lightweight and repeatable way to bootstrap multiple **K
 
 ---
 
+## 🧭 Architecture Diagram
+
+![Cluster Architecture](assets/diagram.drawio.svg)
+
+---
+
 ## 🛠️ Implementation Details
 
 This project **does not use `kubeadm`**. Instead, the Kubernetes control plane is launched directly with `docker-compose` using the official components:

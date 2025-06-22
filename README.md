@@ -20,14 +20,16 @@ This project provides a lightweight and repeatable way to bootstrap multiple **K
 
 ## 📁 Directory Structure
 
-├── main.yml # Main Ansible playbook
-├── vars.yml # Your configuration: clusters, versions, hosts
+```text
+├── main.yml                         # Main Ansible playbook
+├── vars.yml                         # Your configuration: clusters, versions, hosts
 ├── roles/
-│ ├── certs/ # Handles SSL certificate generation
-│ ├── control_plane_setup/ # Brings up etcd, kube-apiserver, scheduler, controller
-│ ├── haproxy_setup/ # Optional: configures HAProxy for TLS routing
-│ ├── kubeconfigs/ # Generates kubeconfig files for each component
-│ └── worker_setup/ # Installs and configures kubelet, containerd on worker nodes
+│   ├── certs/                       # Handles SSL certificate generation
+│   ├── control_plane_setup/        # Brings up etcd, kube-apiserver, scheduler, controller
+│   ├── haproxy_setup/              # Optional: configures HAProxy for TLS routing
+│   ├── kubeconfigs/                # Generates kubeconfig files for each component
+│   └── worker_setup/               # Installs and configures kubelet, containerd on worker nodes
+```
 
 
 ---

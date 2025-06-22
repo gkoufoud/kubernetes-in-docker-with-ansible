@@ -1,0 +1,14 @@
+- name: Gather facts from control hosts
+  ansible.builtin.setup:
+  delegate_to: "{{ item.control_host }}"
+  loop: "{{ resolved_clusters }}"
+  run_once: true
+
+
+- name: Generate HAProxy config
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ haproxy.config_dir }}/kubernetes.cfg"
+    mode: "0644"
+  notify: Reload haproxy container
+  delegate_to: "{{ haproxy.host }}"

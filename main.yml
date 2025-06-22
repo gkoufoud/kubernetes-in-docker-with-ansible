@@ -1,0 +1,62 @@
+- name: Bootstrap Kubernetes Clusters
+  hosts: localhost
+  gather_facts: yes
+  
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Initialize resolved clusters list
+      set_fact:
+        resolved_clusters: []
+
+    - name: Append each resolved cluster with fallback control_host
+      set_fact:
+        resolved_clusters: "{{ resolved_clusters + [updated_cluster] }}"
+      vars:
+        updated_cluster: >-
+          {{
+            item | combine({
+              'control_host': (
+                item.control_host | default(default_control_host)
+                if (item.control_host | default('')) else default_control_host
+              ),
+              'kubernetes_dirs': ['certs', 'kubeconfigs'],
+              'api_fqdn': (item.name | string) ~ '.' ~ external_fqdn,
+              'first_service_ip': (item.service_cidr | ansible.utils.ipaddr('next_usable')),
+            })
+          }}
+      loop: "{{ clusters }}"
+
+    - name: Create kubernetes directories
+      ansible.builtin.file:
+        path: "{{ kubernetes_store_dir }}/{{ item.0.name }}/{{ item.1 }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ resolved_clusters | subelements('kubernetes_dirs') }}"
+      delegate_to: "{{ item.0.control_host }}"
+      run_once: true
+
+    - name: Generate Kubernetes certificates
+      ansible.builtin.include_role:
+        name: certs
+    
+    - name: Generate kubeconfigs
+      ansible.builtin.include_role:
+        name: kubeconfigs
+
+    - name: Setup the control plane
+      ansible.builtin.include_role:
+        name: control_plane_setup
+
+    - name: Setup HAProxy
+      ansible.builtin.include_role:
+        name: haproxy_setup
+      when:
+        - haproxy is defined
+        - haproxy.host is defined
+        - haproxy.config_dir is defined
+
+    - name: Setup the workers
+      ansible.builtin.include_role:
+        name: worker_setup

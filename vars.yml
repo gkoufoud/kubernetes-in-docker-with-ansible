@@ -1,0 +1,46 @@
+ansible_user: root
+ansible_ssh_private_key_file: "{{ ssh_key_file | default('~/.ssh/id_rsa') }}"
+ansible_python_interpreter: "{{ python_interpreter | default('/usr/bin/python3') }}"
+
+kubernetes_store_dir: /opt/kubernetes
+default_control_host: 192.168.0.130
+external_fqdn: example.com
+haproxy:
+  host: 192.168.0.70
+  config_dir: /opt/haproxy/cfg
+ca_cn: "Kubernetes CA"
+certs:
+  - admin
+  - ca
+  - kube-apiserver
+  - kube-controllermanager
+  - kube-scheduler
+  - service-accounts
+  - kube-proxy
+clusters:
+  - name: cluster1
+    control_host: "{{ lookup('env', 'CONTROL_HOST_1') }}"
+    service_cidr: "10.3.0.0/16"
+    pod_cidr: "10.2.0.0/16"
+    api_port: 6443
+    etcd_version: "3.5.9-0"
+    k8s_version: "1.31.0"
+    cni_version: "1.5.1"
+    calico_version: "3.30.2"
+    workers:
+      - name: "c1n1"
+        ip: 192.168.0.131
+      - name: "c1n2"
+        ip: 192.168.0.132
+  - name: cluster2
+    control_host: "{{ lookup('env', 'CONTROL_HOST_2') }}"
+    service_cidr: "10.3.0.0/16"
+    pod_cidr: "10.2.0.0/16"
+    api_port: 6444
+    etcd_version: "3.5.9-0"
+    k8s_version: "1.31.0"
+    cni_version: "1.5.1"
+    calico_version: "3.30.2"
+    workers:
+      - name: "c2n1"
+        ip: 192.168.0.141

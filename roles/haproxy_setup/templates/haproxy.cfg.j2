@@ -1,0 +1,21 @@
+frontend kubernetes_front
+    bind *:6443
+    mode tcp
+    log global
+    timeout client          30000
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.ssl_hello_type 1 }
+
+{% for cluster in resolved_clusters %}
+    use_backend kubernetes_{{ cluster.name }} if { req.ssl_sni -i {{ cluster.api_fqdn }} }
+{% endfor %}
+
+{% for cluster in resolved_clusters %}
+backend kubernetes_{{ cluster.name }}
+    mode tcp
+    log global
+    timeout connect         30000
+    timeout server          30000
+    retries                 3
+    server {{ cluster.name }} {{ cluster.control_host }}:{{ cluster.api_port }}
+{% endfor %}

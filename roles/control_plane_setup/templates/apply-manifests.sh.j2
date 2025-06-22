@@ -1,0 +1,30 @@
+#!/bin/bash
+curDir=$(dirname "$0")
+cd $curDir
+cat kubeconfigs/admin.kubeconfig | sed "s/{{ api_fqdn }}:6443/127.0.0.1:{{ api_port }}/g" > kubeconfigs/admin-ip.kubeconfig
+
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kube-apiserver-to-kubelet.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f bootstrap-token.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kubeconfig-in-cluster.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kube-proxy.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f calico.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kubelet-csr-approver.yaml
+
+
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig create clusterrolebinding kubelet-bootstrap \
+  --clusterrole=system:node-bootstrapper \
+  --group=system:bootstrappers
+
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig create clusterrolebinding node-autoapprove-bootstrap \
+  --clusterrole=system:certificates.k8s.io:certificatesigningrequests:nodeclient \
+  --group=system:bootstrappers
+
+kubectl --kubeconfig=./kubeconfigs/admin-ip.kubeconfig create clusterrolebinding node-autoapprove-certificate-rotation \
+  --clusterrole=system:certificates.k8s.io:certificatesigningrequests:selfnodeclient \
+  --group=system:nodes
+
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig create configmap \
+  -n kube-public \
+  kube-root-ca.crt \
+  --from-file=certs/ca.crt \
+  --dry-run=client -o yaml | kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f -

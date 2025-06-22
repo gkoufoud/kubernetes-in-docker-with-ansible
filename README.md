@@ -20,7 +20,7 @@ This project provides a lightweight and repeatable way to bootstrap multiple **K
 
 ## 🧭 Architecture Diagram
 
-![Cluster Architecture](assets/diagram.drawio.svg)
+![Cluster Architecture](assets/diagram.drawio.png)
 
 ---
 

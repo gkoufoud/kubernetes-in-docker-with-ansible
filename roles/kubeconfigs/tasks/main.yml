@@ -28,7 +28,7 @@
 - name: Fetch ca.crt from remote hosts
   ansible.builtin.fetch:
     src: "{{ kubernetes_store_dir }}/{{ item.name }}/certs/ca.crt"
-    dest: "tmp/kubeconfigs/{{ item.name }}/ca.crt"
+    dest: "/tmp/kubeconfigs/{{ item.name }}/ca.crt"
     flat: yes
     mode: '0644'
   loop: "{{ resolved_clusters }}"

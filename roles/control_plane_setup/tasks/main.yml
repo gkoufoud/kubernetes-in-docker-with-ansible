@@ -163,6 +163,16 @@
     pod_cidr: "{{ item.pod_cidr }}"
     k8s_version: "{{ item.k8s_version }}"
 
+- name: Render coredns.yaml.j2
+  ansible.builtin.template:
+    src: coredns.yaml.j2
+    dest: "/opt/kubernetes/{{ item.name }}/coredns.yaml"
+    mode: "0744"
+  loop: "{{ resolved_clusters }}"
+  delegate_to: "{{ item.control_host }}"
+  vars:
+    cluster_dns: "{{ item.service_cidr | ansible.utils.nthhost(10) }}"
+
 - name: Render kubelet-csr-approver.yaml.j2
   ansible.builtin.template:
     src: kubelet-csr-approver.yaml.j2

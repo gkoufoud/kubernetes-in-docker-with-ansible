@@ -7,6 +7,7 @@ kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kube-apiserver-to-
 kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f bootstrap-token.yaml
 kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kubeconfig-in-cluster.yaml
 kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kube-proxy.yaml
+kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f coredns.yaml
 kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f calico.yaml
 kubectl --kubeconfig=kubeconfigs/admin-ip.kubeconfig apply -f kubelet-csr-approver.yaml
 
